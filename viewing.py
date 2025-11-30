@@ -1,14 +1,17 @@
+import os
+import time
 import json
 import math
-import os
 import string
-
+from loguru import logger
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image
-from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.styles import Alignment, Font, Border, Side, Color, PatternFill, colors
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill, colors
+from openpyxl.worksheet.hyperlink import Hyperlink
 from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.utils.exceptions import IllegalCharacterError
 
 '''
 插入图片的时候，有两个问题：第一是图片大小问题，第二是图片居中问题。
@@ -45,9 +48,9 @@ alignment_left_bottom = Alignment(horizontal="left", vertical="bottom", wrap_tex
 
 def filling(start_loc, end_loc, ws):  # 参数为左上角坐标和右下角坐标，形如'D3','A5'等。ws是worksheet对象。
     x_start = start_loc[0]
-    y_start = start_loc[1:len(start_loc)]  # 切片获取坐标的数字部分
+    y_start = start_loc[1: len(start_loc)]  # 切片获取坐标的数字部分
     x_end = end_loc[0]
-    y_end = end_loc[1:len(end_loc)]
+    y_end = end_loc[1: len(end_loc)]
     len_y = int(y_end) - int(y_start) + 1
     alphabet = string.ascii_uppercase  # 导入字母表
     len_x = alphabet.index(x_end) - alphabet.index(x_start) + 1
@@ -124,13 +127,18 @@ def SetTitle(ws, title, i):
 
 
 def SetIntro(ws, intro, i):
-    ws.merge_cells(start_row=i + 4, start_column=3, end_row=i + 6, end_column=8)
+    ws.merge_cells(start_row=i+4, start_column=3, end_row=i+6, end_column=8)
     ss = 'C' + str(i + 4)
     if len(intro) > 50:
         font = Font(name="等线", size=12)
     else:
         font = Font(name="等线", size=14)
-    ws[ss] = intro
+    try:
+        ws[ss] = intro
+    except IllegalCharacterError:
+        # 移除非法字符（保留可打印字符）
+        cleaned_intro = ''.join([c for c in intro if c.isprintable()])
+        ws[ss] = cleaned_intro
     ws[ss].alignment = alignment_left_top
     ws[ss].font = font
 
@@ -177,7 +185,7 @@ def SetNumber(ws, i):
 # 标记已失效视频
 def MarkDeleted(ws, i):
     # 不知道为什么填充不了红色，就填充黑色好了，黑底黄字
-    ws['I' + str(i + 7)].font = Font(color=colors.YELLOW)
+    ws['I' + str(i + 7)].font = Font(color='FFFF00')
     ws['I' + str(i + 7)].fill = PatternFill(patternType='solid', bgColor=colors.BLACK)
     ws['I' + str(i + 7)] = '已失效'
 
@@ -204,26 +212,45 @@ def SetSome(ws, value_list, i):
     ws['G' + str(i + 7)] = 'UPid'
     ws['H' + str(i + 7)] = value_list[8]
 
+    hyperlink = Hyperlink(ref='F'+str(i+7), target=f"https://www.bilibili.com/video/{value_list[7]}/", display=value_list[7])
+    ws['F' + str(i + 7)].hyperlink = hyperlink
+
     ws.merge_cells(start_row=i + 2, start_column=9, end_row=i + 3, end_column=9)
     ws['I' + str(i + 2)] = value_list[9]
     ws['I' + str(i + 2)].alignment = alignment_center
 
 
-def view(RPath, WPath):
+def view(RPath, WPath, cover_path, face_path):
     file_name_list = os.listdir(RPath)
-    print(file_name_list)
+    logger.info(file_name_list)
     if os.path.exists(WPath):
         os.remove(WPath)
     wb = Workbook()
 
     # 遍历每一个文件
     for i in file_name_list:
-        ws = wb.create_sheet(i.split('.')[0])
-        print(i)
+        json_path = os.path.join(RPath, i)
+        # 检查JSON格式
+        try:
+            with open(json_path, 'r', encoding='utf-8') as fp:
+                data = json.load(fp)
+            # 检查空内容
+            if data == {}:
+                logger.info(f"文件 {i} 内容为空，跳过处理")
+                continue
+        except json.JSONDecodeError as e:
+            logger.error(f"文件 {i} JSON格式错误: {e}，跳过处理")
+            continue
 
+        # 创建worksheet
+        ws = wb.create_sheet(i.split('.')[0])
+        print('-'*10)
+        print(i)
+        print('-'*10)
+        time.sleep(0.5)
+        
         # 图片文件夹
-        Photo_cover_path = '视频封面/' + i.split('.')[0] + '/'
-        Photo_face_path = 'up头像/'
+        Photo_cover_path = os.path.join(cover_path, i.split('.')[0])
 
         # 改变前8行列宽
         column_list = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
@@ -231,11 +258,17 @@ def view(RPath, WPath):
             ws.column_dimensions[j].width = 20
 
         count = 1
-        with open('收藏夹信息/' + i, 'r', encoding='utf-8') as fp:
-            data = json.load(fp)
-            for k, v in data.items():
+        for k, v in data.items():
+            # 检查数据结构完整性
+            required_keys = {'观众数据', '三个时间', '视频信息', 'up主', 'BV', '是否失效'}
+            if not all(key in v for key in required_keys):
+                logger.info(f"条目 {k} 缺少必要字段，跳过处理")
+                continue
+            
+            try:
                 # 设置边框
                 filling('A' + str(count), 'H' + str(count + 7), ws)
+                logger.info(f"    处理视频: {v['视频信息']['标题']} (by: {v['up主']['昵称']})")
                 # 设置一些小格子里的信息
                 some_list = [
                     v['观众数据']['播放量'],
@@ -253,12 +286,14 @@ def view(RPath, WPath):
                 # 设置标题、简介、封面、头像
                 SetTitle(ws, v['视频信息']['标题'], count)
                 SetIntro(ws, v['视频信息']['简介'], count)
-                SetCover(ws, Photo_cover_path + str(v['BV']) + '.jpg', count)
-                SetFace(ws, Photo_face_path + str(v['up主']['ID']) + '.jpg', count)
+                SetCover(ws, os.path.join(Photo_cover_path, f"{str(v['BV']) }.jpg"), count)
+                SetFace(ws, os.path.join(face_path, f"{str(v['up主']['ID'])}.jpg"), count)
                 # 给每个视频一个编号
                 SetNumber(ws, count)
                 if v['是否失效']:
                     MarkDeleted(ws, count)
                 count += 10
-    wb.save(WPath)
+            except KeyError as e:
+                logger.error(f"条目 {k} 数据结构不完整，缺失键: {e}，跳过处理")
+    logger.info('处理完成，保存文件中...')
     wb.save(WPath)
